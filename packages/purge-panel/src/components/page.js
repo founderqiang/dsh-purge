@@ -3,9 +3,11 @@
 // host tokens, one column, explanations in "?" tips instead of paragraphs).
 import { h, useState, useEffect, useCallback } from "../shared/react.js";
 import { PURGE_CSS, NATIVE_CSS, PAGE_CSS } from "../styles/index.js";
-import { useT } from "../shared/locale.js";
+import { compatibilityLevelText, useT } from "../shared/locale.js";
+import { RewindSetting } from "./rewind-setting.js";
 import { apiJson, unavailableStatus } from "../api/client.js";
 import { Btn, HelpTip } from "./primitives.js";
+import { patchEvidence, patchGroupCounts } from "./patch-status.js";
 import { PurgifySection } from "./settings-form.js";
 import { RulesSection } from "./rules.js";
 import { SkillsSection } from "./skills.js";
@@ -19,7 +21,7 @@ const TABS = [
   ["rules", "规则", "规则集与工作区策略"],
   ["skills", "技能", "DSH 技能目录"],
   ["drill", "演练台", "红队演练与环境适配"],
-  ["more", "更多", "服务器名单、更新与维护"],
+  ["more", "更多", "会话外观与服务器设置"],
 ];
 
 function PurgeGlyph({ size = 18 } = {}) {
@@ -40,6 +42,10 @@ function PurgeGlyph({ size = 18 } = {}) {
 }
 
 export function StatusStrip({ info }) {
+  const t = useT();
+  const evidence = patchEvidence(info);
+  const counts =
+    evidence.kind === "detail" ? patchGroupCounts(evidence.rows) : null;
   const compat = info?.compatibility || {};
   const level = compat.level || "";
   const ok = level === "qualified";
@@ -62,17 +68,11 @@ export function StatusStrip({ info }) {
       h(
         "b",
         null,
-        level === "qualified"
-          ? "已回归验证"
-          : level === "unverified"
-            ? "未验证版本"
-            : level === "mixed"
-              ? "组件版本不一致"
-              : level
-                ? "未定位宿主"
-                : info?.ok === false
-                  ? "读取失败"
-                  : "检测中",
+        level
+          ? compatibilityLevelText(t, level)
+          : info?.ok === false
+            ? "读取失败"
+            : "检测中",
       ),
       h(
         HelpTip,
@@ -88,13 +88,15 @@ export function StatusStrip({ info }) {
       h(
         "b",
         null,
-        `${info?.patches_applied ?? "?"}/${info?.patches_total ?? "?"}`,
-        info?.patches_na > 0 ? ` · ${info.patches_na} 条本机不适用` : "",
+        counts
+          ? `${counts.applied}/${counts.denom}`
+          : t("evidence." + evidence.kind),
+        counts?.na > 0 ? ` · ${counts.na} 条本机不适用` : "",
       ),
       h(
         HelpTip,
         { title: "宿主补丁" },
-        `实际写进 DSH 宿主代码的补丁条数（分母只算本机适用的）。全部补丁 ${info?.patches_total_all ?? "?"} 条，其中 ${info?.patches_na ?? 0} 条目标插件/预设未安装；待应用表示锚点还在、还没写入；没对上表示宿主源码已变，需要重新定位锚点。`,
+        "仅有逐条明细时统计实际写入数。部分生效、缺失或无法读取均不算已写入。",
       ),
     ),
     h(
@@ -109,6 +111,13 @@ export function StatusStrip({ info }) {
 /** 磁盘归档与进程入口分别呈现；不能从磁盘写入推断运行时已加载。 */
 export function LayoutNotice({ info }) {
   if (!info || (!info.asar_still_sealed && !info.host_layout)) return null;
+  if (info.host_layout?.family === "tauri") {
+    return h(
+      "p",
+      { className: "dshpp-note", role: "status" },
+      info.host_layout.note,
+    );
+  }
   const sealed = info.asar_still_sealed === true;
   const note =
     info.host_layout?.note ||
@@ -120,6 +129,38 @@ export function LayoutNotice({ info }) {
   const detail = info.asar_handoff?.detail
     ? ` 详情：${info.asar_handoff.detail}${failure?.win32_code != null ? `（Windows 错误 ${failure.win32_code}）` : ""}`
     : "";
+  const layout = info.host_layout;
+  if (
+    info.ok !== false &&
+    info.surface === "web" &&
+    layout?.disk?.surface === "web" &&
+    layout.state === "unknown_runtime" &&
+    layout.process?.entry_layout === "unknown" &&
+    layout.process.matches_target === null &&
+    layout.disk.archive_exists === null &&
+    layout.disk.unpacked_exists === null &&
+    !info.desktop_exe &&
+    !info.desktop_install &&
+    !sealed &&
+    !layout.errors?.length &&
+    info.asar_handoff?.phase === "unknown_target" &&
+    !info.asar_handoff.error &&
+    !info.asar_handoff.detail
+  ) {
+    return h(
+      "details",
+      { className: "dshpp-layout-details" },
+      h("summary", null, "换包状态：不适用（Web 宿主）"),
+      h(
+        "p",
+        { className: "dshpp-note" },
+        "Web 服务无需桌面归档换包。原始诊断：",
+        layout.state,
+        " / ",
+        info.asar_handoff.phase,
+      ),
+    );
+  }
   const confirmed =
     info.host_layout?.state === "unpacked_entry" &&
     info.host_layout?.process?.matches_target === true &&
@@ -226,7 +267,6 @@ export function PurgePage() {
         ),
       ),
     ),
-    h(StatusStrip, { info }),
     h(VersionNotice, { info }),
     h(LayoutNotice, { info }),
     h(
@@ -253,9 +293,10 @@ export function PurgePage() {
       h(
         "div",
         { hidden: tab !== "status", className: "dshpp-sec" },
+        h(StatusStrip, { info }),
         h(PurgifySection, { page: "status", onStatus: mergeInfo }),
         h(StatusExtras),
-        h(CommunityMaintenance),
+        h(CommunityMaintenance, { localVersion: info?.plugin_version || "" }),
       ),
       h(
         "div",
@@ -275,6 +316,7 @@ export function PurgePage() {
       h(
         "div",
         { hidden: tab !== "more", className: "dshpp-sec" },
+        __COMMUNITY__ && tab === "more" ? h(RewindSetting) : null,
         visited.more ? h(PurgifySection, { page: "more" }) : null,
       ),
       tab === "drill"

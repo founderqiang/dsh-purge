@@ -395,6 +395,17 @@ test("update status distinguishes loaded code, pending disk version and independ
     0,
     "rendering status must never install or restart",
   );
+  await render({
+    error: "network timeout",
+    installError: "network timeout",
+    reconciliationError: "package unreadable",
+  });
+  assert.deepEqual(
+    tree.root
+      .findAllByProps({ role: "alert" })
+      .map((node) => node.children.join("")),
+    ["package unreadable", "network timeout"],
+  );
   await unmount(tree);
 });
 
@@ -435,4 +446,41 @@ test("saving a token does not erase masked proxy credentials or auto-update pref
     value: { githubToken: "fixture-token" },
   });
   await unmount(tree);
+});
+
+test("mirror changes save only the transport preference and clearing it is explicit", async () => {
+  for (const [initial, next] of [
+    ["", "https://mirror.example/"],
+    ["https://mirror.example/", ""],
+  ]) {
+    const h = harness(
+      () => reply({ ok: true, update_preferences: { mirrorUrl: next } }),
+      "UpdateChannelDialog",
+    );
+    let tree;
+    await act(async () => {
+      tree = create(
+        React.createElement(h.Component, {
+          value: {
+            mirrorUrl: initial,
+            proxyUrl: "socks5://proxy.test:1080",
+            hasProxyCredentials: true,
+            hasGithubToken: true,
+          },
+          onSaved() {},
+          onClose() {},
+        }),
+      );
+    });
+    const field = tree.root.findByProps({ placeholder: "https://镜像主机/" });
+    assert.equal(field.props.value, initial);
+    await act(async () => field.props.onChange({ target: { value: next } }));
+    await click(tree, "保存");
+    assert.equal(h.calls.length, 1);
+    assert.deepEqual(h.calls[0].body, {
+      op: "preferences",
+      value: { mirrorUrl: next },
+    });
+    await unmount(tree);
+  }
 });

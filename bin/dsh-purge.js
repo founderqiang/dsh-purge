@@ -30,6 +30,9 @@ function printStatus(state) {
     const s = state.patch_status[p.id];
     const mark = s === "applied" ? "✓" : s === "pending" ? "✗" : "·";
     out.push(`    ${mark} [#${String(p.id).padEnd(2)}] ${p.name.padEnd(30)} ${p.layer}/${p.layer_en} — ${s}`);
+    if (p.id === 71) {
+      for (const file of state.patch_files?.[71] || []) out.push(`      ${file.status}  ${file.path}`);
+    }
   }
   out.push("");
   out.push(`  shim: dsh.cmd=${state.shim_cmd}  dsh.ps1=${state.shim_ps1}  dsh=${state.shim_bin}`);
@@ -60,7 +63,6 @@ export async function main(args = process.argv.slice(2), dependencies = {}) {
     let failed = false;
     if (!state.ai_base) {
       console.log("[ERROR] " + hostCore.missingAiBaseMessage());
-      console.log("  fix: 把 DSH_BASE 指到含 dsh-agent-instructions/lib 的 @deepseek-ai 目录");
       process.exit(1);
     }
     const inject = hostRules.resolveInjectText(state.dsh_home);

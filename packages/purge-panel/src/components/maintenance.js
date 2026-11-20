@@ -370,13 +370,16 @@ export function UpdatePreferences({
               ? `上次检查：${new Date(status.checkedAt).toLocaleString()}${status.hasUpdate ? ` · 可用版本 ${status.availableVersion}` : ""}`
               : "启动后自动检查；安装后仅提示手动重启。",
     ),
-    status.reconciliationError
-      ? h("p", { role: "alert" }, status.reconciliationError)
-      : null,
-    [...new Set([status.error, status.installError].filter(Boolean))].map(
-      (message) => h("p", { key: message, role: "alert" }, message),
-    ),
-    error ? h("p", { role: "alert" }, error) : null,
+    [
+      ...new Set(
+        [
+          status.reconciliationError,
+          status.error,
+          status.installError,
+          error,
+        ].filter(Boolean),
+      ),
+    ].map((message) => h("p", { key: message, role: "alert" }, message)),
   );
 }
 
@@ -391,6 +394,7 @@ export function UpdatePreferences({
 export function UpdateChannelDialog({ value, onClose, onSaved }) {
   const tr = useText();
   const [proxy, setProxy] = useState(value?.proxyUrl || "");
+  const [mirror, setMirror] = useState(value?.mirrorUrl || "");
   const [token, setToken] = useState("");
   const [clearToken, setClearToken] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -418,6 +422,8 @@ export function UpdateChannelDialog({ value, onClose, onSaved }) {
   async function save() {
     if (saving) return;
     const next = {};
+    if (mirror.trim() !== (value?.mirrorUrl || ""))
+      next.mirrorUrl = mirror.trim();
     if (proxy.trim() !== (value?.proxyUrl || "")) next.proxyUrl = proxy.trim();
     // 勾了清除就不要再把输入框里的内容发出去，避免两个动作互相覆盖。
     if (clearToken) next.clearGithubToken = true;
@@ -464,6 +470,23 @@ export function UpdateChannelDialog({ value, onClose, onSaved }) {
         tr(
           "updch.scope",
           "这里的代理与密钥只作用于本插件的更新检查与下载通道，不影响其它模型厂商的请求，也不写入宿主进程环境。留空继承已有更新代理环境。",
+        ),
+      ),
+      h(
+        "label",
+        { className: "dshpp-updch-label" },
+        h("span", null, "GitHub 镜像（可选）"),
+        h("input", {
+          type: "text",
+          value: mirror,
+          placeholder: "https://镜像主机/",
+          onChange: (e) => setMirror(e.target.value),
+          disabled: saving,
+        }),
+        h(
+          "small",
+          null,
+          "用于查询与下载；不发送 GitHub 密钥。安装仍须从 GitHub 获取官方校验值，可使用更新代理。留空关闭镜像。",
         ),
       ),
       h(
@@ -553,7 +576,13 @@ export function UpdateChannelDialog({ value, onClose, onSaved }) {
   );
 }
 
-export function CommunityMaintenance() {
+// A successful save updates any other mounted settings entry in this client.
+const preferenceListeners = new Set();
+function publishPreferences(next) {
+  for (const receive of preferenceListeners) receive(next);
+}
+
+export function CommunityMaintenance({ localVersion = "" } = {}) {
   const [value, setValue] = useState(null),
     [notice, setNotice] = useState(""),
     [busy, setBusy] = useState(false),
@@ -567,7 +596,9 @@ export function CommunityMaintenance() {
   const mounted = useRef(false),
     generation = useRef(0),
     running = useRef(false);
+  const latestSave = useRef(null);
   const load = useCallback(async () => {
+    const previousSave = latestSave.current;
     const request = ++generation.current;
     setListState("loading");
     setListError("");
@@ -576,7 +607,11 @@ export function CommunityMaintenance() {
       assertMaintenanceResult(result);
       if (!Array.isArray(result.backups)) throw new Error("备份列表响应无效");
       if (!mounted.current || request !== generation.current) return;
-      setValue(result);
+      setValue(
+        previousSave === latestSave.current
+          ? result
+          : { ...result, update_preferences: latestSave.current },
+      );
       setSelected((current) =>
         result.backups.some((b) => b.id === current) ? current : "",
       );
@@ -589,8 +624,16 @@ export function CommunityMaintenance() {
   }, []);
   useEffect(() => {
     mounted.current = true;
+    const receive = (next) => {
+      latestSave.current = next;
+      setValue(
+        (current) => current && { ...current, update_preferences: next },
+      );
+    };
+    preferenceListeners.add(receive);
     load();
     return () => {
+      preferenceListeners.delete(receive);
       mounted.current = false;
       generation.current++;
     };
@@ -656,7 +699,19 @@ export function CommunityMaintenance() {
   return h(
     "section",
     { className: "dshpp-panel", "aria-label": "社区版维护" },
-    h("h3", null, "维护：更新与本机备份"),
+    h(
+      "div",
+      { className: "dshpp-maint-head" },
+      h("h3", null, "维护：更新与本机备份"),
+      localVersion
+        ? h(
+            "span",
+            { className: "dshpp-maint-ver" },
+            "本机 v" + localVersion,
+            h("b", null, "当前"),
+          )
+        : null,
+    ),
     // 通道现状摘要：代理是否直连、密钥是否已配置（密钥明文永不回显）。
     // 入口按钮不在这里，它跟「自动检查更新」放在同一行。
     value
@@ -676,8 +731,7 @@ export function CommunityMaintenance() {
     h(UpdatePreferences, {
       value: value?.update_preferences,
       status: value?.update_status,
-      onSaved: (next) =>
-        setValue((current) => ({ ...current, update_preferences: next })),
+      onSaved: publishPreferences,
       onOpenChannel: () => setChannelOpen(true),
     }),
     h(
@@ -799,7 +853,7 @@ export function CommunityMaintenance() {
           value: value.update_preferences,
           onClose: () => setChannelOpen(false),
           onSaved: (next) => {
-            setValue((current) => ({ ...current, update_preferences: next }));
+            publishPreferences(next);
             setNotice(
               tr("updch.saved", "更新通道已保存，下一次检查更新即生效。"),
             );
